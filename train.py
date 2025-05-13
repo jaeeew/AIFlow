@@ -1,72 +1,120 @@
-from torch.utils.data import DataLoader
-from torchvision import transforms, datasets
-from dataset_class import ContamDataset
-from UNet import UNet
-from torch.utils.data import Dataset
+import os
 import torch
-import torch.nn as nn  # torch.nn 모듈을 nn으로 불러오기
-import torch.optim as optim
-import matplotlib.pyplot as plt
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
+import numpy as np
+from tqdm import tqdm
 
-# 이미지 크기 변경 및 패딩을 위한 transforms
-transform = transforms.Compose([
-    transforms.Resize((256, 256)),  # 이미지 크기를 256x256으로 리사이즈
-    transforms.ToTensor(),  # 텐서로 변환
-])
+# UNet 텍스트 모델
+class UNet(nn.Module):
+    def __init__(self):
+        super(UNet, self).__init__()
+        def CBR(in_ch, out_ch):
+            return nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(out_ch, out_ch, 3, padding=1),
+                nn.ReLU()
+            )
+        self.enc1 = CBR(3, 64)
+        self.enc2 = CBR(64, 128)
+        self.enc3 = CBR(128, 256)
+        self.enc4 = CBR(256, 512)
+        self.pool = nn.MaxPool2d(2)
+        self.bottleneck = CBR(512, 1024)
+        self.upconv4 = nn.ConvTranspose2d(1024, 512, 2, 2)
+        self.dec4 = CBR(1024, 512)
+        self.upconv3 = nn.ConvTranspose2d(512, 256, 2, 2)
+        self.dec3 = CBR(512, 256)
+        self.upconv2 = nn.ConvTranspose2d(256, 128, 2, 2)
+        self.dec2 = CBR(256, 128)
+        self.upconv1 = nn.ConvTranspose2d(128, 64, 2, 2)
+        self.dec1 = CBR(128, 64)
+        self.out_conv = nn.Conv2d(64, 1, 1)
 
-# Dataset 정의 시 transforms를 적용
-train_dataset = ContamDataset(
-    "dataset_split/train/images", "dataset_split/train/masks", transform=transform
-)
-val_dataset = ContamDataset(
-    "dataset_split/val/images", "dataset_split/val/masks", transform=transform
-)
+    def forward(self, x):
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
+        b = self.bottleneck(self.pool(e4))
+        d4 = self.dec4(torch.cat([self.upconv4(b), e4], dim=1))
+        d3 = self.dec3(torch.cat([self.upconv3(d4), e3], dim=1))
+        d2 = self.dec2(torch.cat([self.upconv2(d3), e2], dim=1))
+        d1 = self.dec1(torch.cat([self.upconv1(d2), e1], dim=1))
+        return self.out_conv(d1)
 
-# DataLoader 정의
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=4)
+# Dice loss function
+def dice_loss(pred, target, smooth=1e-5):
+    pred = torch.sigmoid(pred)  # logits -> probs
+    pred = pred.view(-1)
+    target = target.view(-1)
+    intersection = (pred * target).sum()
+    return 1 - (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
 
-# 모델, 손실 함수, 최적화 함수 정의
-model = UNet()  # GPU로 모델을 옮김
-criterion = nn.BCELoss()  # 이진 교차 엔트로피 손실 함수
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
+# 데이터셋 클래스
+class VinylDataset(Dataset):
+    def __init__(self, img_dir, mask_dir, transform=None):
+        self.img_dir = img_dir
+        self.mask_dir = mask_dir
+        self.images = sorted(os.listdir(img_dir))
+        self.transform = transform
 
-# 학습 루프
-for epoch in range(10):
-    model.train()  # 모델을 훈련 모드로 설정
-    total_loss = 0
-    for imgs, masks in train_loader:
-        imgs, masks = imgs, masks  # GPU로 데이터 이동
+    def __len__(self):
+        return len(self.images)
 
-        outputs = model(imgs)  # 모델을 통해 예측값을 얻음
-        loss = criterion(outputs, masks)  # 손실 계산
+    def __getitem__(self, idx):
+        filename = os.path.splitext(self.images[idx])[0]
+        img_path = os.path.join(self.img_dir, self.images[idx])
+        mask_path = os.path.join(self.mask_dir, f"{filename}_mask.png")
 
-        optimizer.zero_grad()  # 기울기 초기화
-        loss.backward()  # 역전파
-        optimizer.step()  # 가중치 업데이트
-        total_loss += loss.item()  # 손실값 누적
+        image = Image.open(img_path).convert("RGB")
+        mask = Image.open(mask_path).convert("L")
 
-    print(f"Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
+        if self.transform:
+            image = self.transform(image)
 
+        mask = mask.resize((256, 256))
+        mask = np.array(mask)
+        mask = (mask > 127).astype(np.float32)
+        mask = torch.from_numpy(mask).unsqueeze(0)  # (1, H, W)
 
-model.eval()
-with torch.no_grad():
-    for imgs, masks in val_loader:
-        imgs = imgs
-        outputs = model(imgs)
-        preds = (outputs > 0.5).float()
+        return image, mask
 
-        for i in range(len(imgs)):
-            plt.subplot(1,3,1)
-            plt.imshow(imgs[i].cpu().permute(1,2,0))
-            plt.title("Image")
+# 학습 함수
+def train_model():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.ToTensor()
+    ])
+    dataset = VinylDataset("data/vinyldata", "data/vinylmasks_binary", transform=transform)
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
 
-            plt.subplot(1,3,2)
-            plt.imshow(masks[i].cpu().squeeze(), cmap='gray')
-            plt.title("Ground Truth")
+    model = UNet().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    bce_loss = nn.BCEWithLogitsLoss()
 
-            plt.subplot(1,3,3)
-            plt.imshow(preds[i].cpu().squeeze(), cmap='gray')
-            plt.title("Prediction")
-            plt.show()
-        break
+    for epoch in range(20):
+        model.train()
+        total_loss = 0
+        for imgs, masks in tqdm(dataloader):
+            imgs, masks = imgs.to(device), masks.to(device)
+            preds = model(imgs)
+
+            loss = bce_loss(preds, masks) + dice_loss(preds, masks)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f"Epoch {epoch+1}: Loss = {total_loss / len(dataloader):.4f}")
+
+    torch.save(model.state_dict(), "unet_vinyl.pth")
+    print("✅ 모델 저장 완료")
+
+if __name__ == "__main__":
+    train_model()
