@@ -21,7 +21,7 @@ transform = A.Compose([
 ])
 
 # 비닐 감지 함수
-def detect_vinyl(img: Image.Image) -> bool:
+def detect_vinyl(img: Image.Image) -> str:
     img_np = np.array(img)
     augmented = transform(image=img_np)
     img_tensor = augmented['image'].unsqueeze(0).to(device)
@@ -33,4 +33,4 @@ def detect_vinyl(img: Image.Image) -> bool:
     vinyl_ratio = (mask > 0.3).mean()
 
     # 비닐 탐지 결과 반환 (비닐이 일정 이상 있으면 True)
-    return vinyl_ratio > 0.02
+    return 'vinyl' if vinyl_ratio > 0.03 else 'not'

@@ -1,87 +1,62 @@
-# AIFLOW-Backend
+# 🧠 AI_MODEL - 폐기물 이미지 분류 및 세분화 모델
 
-## 개요
-AIFLOW-Backend는 이미지 분류 및 분석을 위한 Flask 기반 REST API 서비스입니다. 세 가지 주요 기능을 하나의 파이프라인으로 연결하여 제공합니다:
+이 프로젝트는 폐기물 사진을 자동으로 분석하여 **재활용 가능 여부**를 판단하는 AI 모델들로 구성되어 있습니다.  
+아래와 같은 3단계 과정을 통해 이미지 분석을 수행합니다:
 
-1. **재질 분류**: 종이(paper) vs 플라스틱(plastic)  
-2. **비닐 검출**: 플라스틱 이미지에서 비닐(foil) 유무 판별  
-3. **오염도 평가**: 비닐이 없는 플라스틱 이미지에서 오염도(`clean`, `slight`, `heavy`) 평가  
-
----
-
-## 주요 기능
-- **3단계 파이프라인**: 분류 → 비닐 검출 → 오염도 평가  
-- **사전 학습된 모델** (`checkpoints/` 폴더)  
-  - `best_classification_model.pth`  
-  - `best_vinyl_model.pth`  
-  - `best_contamination_model.pth`  
-- **간단한 REST API**: `/upload` 엔드포인트  
-- **오류 처리**: 예측 중 발생하는 오류를 JSON 형태로 반환  
+1. 🔍 **재질 분류**: 종이 / 플라스틱
+2. 🧻 **비닐 감지**: 플라스틱에 비닐이 붙어있는지 판단
+3. 💧 **오염도 평가**: 오염된 정도(깨끗함 / 약간 오염 / 심하게 오염) 분석
 
 ---
 
-## 디렉토리 구조
+## 📁 디렉토리 구조
 
 ```
-AIFLOW-Backend/
-├── clf_model.py           # 재질 분류 (paper vs plastic)
-├── vinyl_model.py         # 비닐 검출 (플라스틱 대상)
-├── ctm_model.py           # 오염도 평가 (플라스틱, 비닐 없음)
-├── server.py              # Flask API 서버
-├── uploads/               # 업로드된 이미지 임시 저장
-├── requirements.txt       # 의존성 목록
-└── checkpoints/           # 사전 학습된 모델 파일
-    ├── best_classification_model.pth
-    ├── best_vinyl_model.pth
-    └── best_contamination_model.pth
+AI_model/
+│
+├── train_classification.py       # 재질 분류 (plastic vs paper) 학습 스크립트
+├── test_classification.py        # 분류 모델 테스트
+├── model_classification.py       # EfficientNet 기반 분류 모델 정의
+│
+├── train_contamination.py        # 오염도 segmentation 학습
+├── test_contamination.py         # 오염도 테스트 및 등급 분류
+├── model_contamination.py        # UNet + HybridLoss (BCE + Dice + Focal)
+│
+├── train_vinyl.py                # 비닐 감지 segmentation 학습
+├── test_vinyl.py                 # 비닐 여부 테스트 및 판단
+├── model_vinyl.py                # Vinyl segmentation 모델 및 손실 함수 정의
+│
+├── image_test_flow.py            # 전체 파이프라인 통합 실행 스크립트
+└── README.md                     # 프로젝트 설명 파일
 ```
 
 ---
 
-## API 사용법
+## ✅ 주요 기능
 
-### POST `/upload`  
-이미지를 업로드하여 세 단계 파이프라인을 실행하고 결과를 반환합니다.
+### 1️⃣ 재질 분류 (Plastic vs Paper)
+- `EfficientNet-B0` 기반 이진 분류 모델 사용
+- `classification_dataset` 폴더에서 이미지 로딩 후 학습
+- `sigmoid` + `BCEWithLogitsLoss` 사용
 
-#### 요청
-- **Content-Type**: `multipart/form-data`
-- **Form 필드**: `file` (이미지 파일)
+### 2️⃣ 비닐 감지
+- `segmentation_models_pytorch`의 UNet 구조 사용
+- HybridLoss = BCE + Dice + Focal 조합으로 세그멘테이션 학습
+- 비닐 픽셀 비율이 2% 이상이면 `비닐 존재`로 판단
 
-#### 응답
-
-- **200 OK**
-  
-  ```
-  { "result": "paper" }
-  { "result": "plastic_with_vinyl" }
-  { "result": "plastic_clean" }  // 또는 "plastic_slight" / "plastic_heavy"
-
-
-- **500 Internal Server Error**
-
-```
-  { "error": "에러 메시지" }
-```
+### 3️⃣ 오염도 평가
+- 오염 영역 마스크 예측 후 픽셀 비율로 등급 나눔
+- contamination ratio 기준:
+  - ✅ `clean` : < 3%
+  - ⚠️ `slightly dirty` : 3% ~ 20%
+  - ❌ `dirty` : > 20%
 
 ---
 
-## 모델 파일 설명
+## 🚀 통합 실행 방법
 
-### `clf_model.py`
-- 재질 분류 모델 로드 및 추론  
-- **입력 이미지**: 224×224 리사이즈 및 정규화  
-- **예측 임계값**: `0.5`  
+```bash
+python image_test_flow.py
 
-### `vinyl_model.py`
-- U-Net 기반 세그멘테이션 모델 로드  
-- Albumentations 전처리 → 시그모이드 마스크 산출  
-- **마스크 비율 > 2%** → 비닐 존재로 판정  
 
-### `ctm_model.py`
-- 오염도 세그멘테이션 모델 로드  
-- 시그모이드 마스크로부터 오염 픽셀 비율 계산  
-- **분류 기준**  
-  - `<1%`: `clean`  
-  - `1%–20%`: `slight`  
-  - `>20%`: `heavy`  
 
